@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { clearSessionCookie, createSessionCookie, hasValidSession, SESSION_SECONDS } from '@/lib/auth';
+import { pbkdf2Sync } from 'node:crypto';
+import { clearSessionCookie, createSessionCookie, hasValidSession, SESSION_SECONDS, verifyPassword } from '@/lib/auth';
 
 const secret = 'test-session-secret-that-is-longer-than-32-characters';
 
@@ -32,5 +33,17 @@ describe('seven-day session', () => {
 
   it('clears the remembered session on logout', () => {
     expect(clearSessionCookie()).toContain('Max-Age=0');
+  });
+});
+
+describe('team password', () => {
+  afterEach(() => { delete process.env.TEAM_PASSWORD_HASH; });
+
+  it('verifies a Workers-compatible 100,000-round PBKDF2 record', async () => {
+    const salt = Buffer.from('fixed-test-salt');
+    const hash = pbkdf2Sync('test-password', salt, 100000, 32, 'sha256');
+    process.env.TEAM_PASSWORD_HASH = `pbkdf2$100000$${salt.toString('base64url')}$${hash.toString('base64url')}`;
+    expect(await verifyPassword('test-password')).toBe(true);
+    expect(await verifyPassword('wrong-password')).toBe(false);
   });
 });
