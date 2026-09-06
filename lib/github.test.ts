@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { nextVersion, safeName } from '@/lib/github';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getSummary, nextVersion, safeName } from '@/lib/github';
 import type { VersionEntry } from '@/lib/types';
 
 const base: VersionEntry = {
@@ -9,6 +9,14 @@ const base: VersionEntry = {
 };
 
 describe('GitHub version helpers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_REPO;
+    delete process.env.TEAM_MEMBERS;
+    delete process.env.PAPER_OWNER;
+  });
+
   it('generates the next version inside each category', () => {
     expect(nextVersion([base, { ...base, event_id: '2', version: 'v012' }], 'code')).toBe('v013');
     expect(nextVersion([base], 'paper-main')).toBe('v001');
@@ -17,5 +25,20 @@ describe('GitHub version helpers', () => {
   it('keeps Chinese names while removing unsafe path characters', () => {
     expect(safeName('论文 主稿:最终版?.docx')).toBe('论文-主稿-最终版-.docx');
     expect(safeName('../../')).toBe('file');
+  });
+
+  it('identifies the app with a User-Agent on GitHub API requests', async () => {
+    process.env.GITHUB_TOKEN = 'test-token';
+    process.env.GITHUB_REPO = 'owner/private-repo';
+    process.env.TEAM_MEMBERS = '张怡慧';
+    process.env.PAPER_OWNER = '张怡慧';
+    const content = Buffer.from(JSON.stringify({ entries: [] })).toString('base64');
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ content, encoding: 'base64' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getSummary();
+
+    const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+    expect(headers.get('User-Agent')).toBe('sdu-modeling-version-log');
   });
 });

@@ -13,6 +13,7 @@ async function github<T>(path: string, init?: RequestInit): Promise<T> {
   headers.set('Accept', 'application/vnd.github+json');
   headers.set('Authorization', `Bearer ${token}`);
   headers.set('X-GitHub-Api-Version', '2022-11-28');
+  headers.set('User-Agent', 'sdu-modeling-version-log');
   headers.set('content-type', 'application/json');
   const response = await fetch(`https://api.github.com${path}`, {
     ...init,
