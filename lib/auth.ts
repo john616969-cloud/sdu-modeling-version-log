@@ -1,5 +1,5 @@
 const COOKIE_NAME = 'modeling_session';
-const SESSION_SECONDS = 12 * 60 * 60;
+export const SESSION_SECONDS = 7 * 24 * 60 * 60;
 
 function bytesToBase64Url(bytes: Uint8Array) {
   let binary = '';
