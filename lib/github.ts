@@ -1,9 +1,10 @@
 import { categoryFolders, githubConfig } from '@/lib/config';
-import type { AuditEvent, Category, Summary, VersionEntry } from '@/lib/types';
+import type { AuditEvent, Category, PresenceRecord, PresenceSummary, Summary, VersionEntry } from '@/lib/types';
 
 type GitHubFile = { sha: string; content?: string; encoding?: string; download_url?: string | null; name?: string };
 type LogIndex = { entries: VersionEntry[] };
 type AuditIndex = { events: AuditEvent[] };
+type PresenceIndex = { records: PresenceRecord[] };
 type CategoryState = Partial<Record<Category, { version: string; repository_path: string | null; event_id: string }>>;
 
 function encodePath(path: string) { return path.split('/').map(encodeURIComponent).join('/'); }
@@ -75,9 +76,83 @@ export function nextVersion(entries: VersionEntry[], category: Category) {
   return `v${String(number).padStart(3, '0')}`;
 }
 
-function beijingTimestamp() {
+function beijingTimestamp(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  return `${formatter.format(new Date()).replace(' ', 'T')}+08:00`;
+  return `${formatter.format(date).replace(' ', 'T')}+08:00`;
+}
+
+const PRESENCE_WRITE_INTERVAL_MS = 4 * 60 * 1000;
+export const PRESENCE_ONLINE_WINDOW_MS = 10 * 60 * 1000;
+
+function isPresenceRecord(value: unknown): value is PresenceRecord {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<PresenceRecord>;
+  return typeof item.presence_id === 'string' && typeof item.member === 'string' && typeof item.session_id === 'string' && typeof item.online_at === 'string' && Number.isFinite(Date.parse(item.online_at)) && typeof item.last_active_at === 'string' && Number.isFinite(Date.parse(item.last_active_at));
+}
+
+function validPresenceRecords(records: unknown[]) {
+  return records.filter(isPresenceRecord);
+}
+
+export function applyPresenceHeartbeat(records: PresenceRecord[], args: { member: string; sessionId: string; now: Date; presenceId: string }) {
+  const clean = validPresenceRecords(records).sort((a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at));
+  const latest = clean.find((record) => record.member === args.member && record.session_id === args.sessionId);
+  const timestamp = beijingTimestamp(args.now);
+  const elapsed = latest ? args.now.getTime() - Date.parse(latest.last_active_at) : Number.POSITIVE_INFINITY;
+  if (latest && elapsed >= 0 && elapsed < PRESENCE_WRITE_INTERVAL_MS) return { record: latest, records: clean, written: false };
+  const record: PresenceRecord = latest && elapsed >= 0 && elapsed <= PRESENCE_ONLINE_WINDOW_MS
+    ? { ...latest, last_active_at: timestamp }
+    : { presence_id: args.presenceId, member: args.member, session_id: args.sessionId, online_at: timestamp, last_active_at: timestamp };
+  const next = [record, ...clean.filter((item) => item.presence_id !== record.presence_id)]
+    .sort((a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at))
+    .slice(0, 500);
+  return { record, records: next, written: true };
+}
+
+export function buildPresenceSummary(records: PresenceRecord[], members: string[], now = new Date()): PresenceSummary {
+  const clean = validPresenceRecords(records).sort((a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at));
+  const isOnline = (record: PresenceRecord) => now.getTime() - Date.parse(record.last_active_at) <= PRESENCE_ONLINE_WINDOW_MS && now.getTime() >= Date.parse(record.last_active_at);
+  return {
+    members: members.map((member) => {
+      const memberRecords = clean.filter((record) => record.member === member);
+      const active = memberRecords.filter(isOnline);
+      const latest = memberRecords[0];
+      return {
+        member,
+        online: active.length > 0,
+        online_at: active.length > 0 ? active.reduce((earliest, record) => Date.parse(record.online_at) < Date.parse(earliest) ? record.online_at : earliest, active[0].online_at) : latest?.online_at ?? null,
+        last_active_at: active[0]?.last_active_at ?? latest?.last_active_at ?? null,
+      };
+    }),
+    records: clean.map(({ session_id: _sessionId, ...record }) => ({ ...record, online: isOnline({ ...record, session_id: _sessionId }) })),
+  };
+}
+
+export async function getPresenceSummary(members: string[]) {
+  const index = await readJson<PresenceIndex>('presence/index.json', undefined, { records: [] });
+  return buildPresenceSummary(Array.isArray(index.records) ? index.records : [], members);
+}
+
+export async function recordPresence(args: { member: string; sessionId: string }) {
+  const { repository, branch } = githubConfig();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const reference = await github<{ object: { sha: string } }>(`/repos/${repository}/git/ref/heads/${encodePath(branch)}`);
+    const parentSha = reference.object.sha;
+    const parent = await github<{ tree: { sha: string } }>(`/repos/${repository}/git/commits/${parentSha}`);
+    const index = await readJson<PresenceIndex>('presence/index.json', parentSha, { records: [] });
+    const result = applyPresenceHeartbeat(Array.isArray(index.records) ? index.records : [], { ...args, now: new Date(), presenceId: crypto.randomUUID() });
+    if (!result.written) return result.record;
+    const blob = await github<{ sha: string }>(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: JSON.stringify({ records: result.records }, null, 2) + '\n', encoding: 'utf-8' }) });
+    const tree = await github<{ sha: string }>(`/repos/${repository}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: parent.tree.sha, tree: [
+      { path: 'presence/index.json', mode: '100644', type: 'blob', sha: blob.sha },
+    ] }) });
+    const commit = await github<{ sha: string }>(`/repos/${repository}/git/commits`, { method: 'POST', body: JSON.stringify({ message: `[presence] ${args.member} active`, tree: tree.sha, parents: [parentSha] }) });
+    try {
+      await github(`/repos/${repository}/git/refs/heads/${encodePath(branch)}`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }) });
+      return result.record;
+    } catch (error) { if ((error as { status?: number }).status !== 422 || attempt === 2) throw error; }
+  }
+  throw new Error('在线记录并发写入失败。');
 }
 
 export function prependAuditEvent(events: AuditEvent[], event: AuditEvent) {

@@ -27,9 +27,10 @@ describe('seven-day session', () => {
     expect(cookie).toContain('SameSite=Strict');
     expect(token).toBeTruthy();
     const payload = token!.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
-    const parsed = JSON.parse(Buffer.from(payload, 'base64').toString('utf8')) as { member: string; role: string; exp: number };
+    const parsed = JSON.parse(Buffer.from(payload, 'base64').toString('utf8')) as { member: string; role: string; sessionId: string; exp: number };
     expect(parsed.member).toBe('张怡慧');
     expect(parsed.role).toBe('admin');
+    expect(parsed.sessionId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(parsed.exp).toBeGreaterThanOrEqual(before + SESSION_SECONDS);
     expect(parsed.exp).toBeLessThanOrEqual(before + SESSION_SECONDS + 1);
   });

@@ -36,3 +36,25 @@ export type AuditEvent = {
   version: string | null;
   category: Category | null;
 };
+
+export type PresenceRecord = {
+  presence_id: string;
+  member: string;
+  session_id: string;
+  online_at: string;
+  last_active_at: string;
+};
+
+export type PresenceView = Omit<PresenceRecord, 'session_id'> & { online: boolean };
+
+export type MemberPresence = {
+  member: string;
+  online: boolean;
+  online_at: string | null;
+  last_active_at: string | null;
+};
+
+export type PresenceSummary = {
+  members: MemberPresence[];
+  records: PresenceView[];
+};

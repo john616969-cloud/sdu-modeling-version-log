@@ -1,7 +1,7 @@
 const COOKIE_NAME = 'modeling_session';
 export const SESSION_SECONDS = 7 * 24 * 60 * 60;
 export type SessionRole = 'admin' | 'member';
-export type Session = { member: string; role: SessionRole; exp: number };
+export type Session = { member: string; role: SessionRole; sessionId: string; exp: number };
 
 function bytesToBase64Url(bytes: Uint8Array) {
   let binary = '';
@@ -52,7 +52,7 @@ export async function authenticateMember(member: string, password: string): Prom
 export async function createSessionCookie(identity: { member: string; role: SessionRole }) {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.length < 32) throw new Error('网站会话密钥尚未正确配置。');
-  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ member: identity.member, role: identity.role, exp: Math.floor(Date.now() / 1000) + SESSION_SECONDS })));
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ member: identity.member, role: identity.role, sessionId: crypto.randomUUID(), exp: Math.floor(Date.now() / 1000) + SESSION_SECONDS })));
   const signature = bytesToBase64Url(await hmac(payload, secret));
   return `${COOKIE_NAME}=${payload}.${signature}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_SECONDS}`;
 }
@@ -73,11 +73,11 @@ export async function getSession(request: Request): Promise<Session | null> {
     const expected = await hmac(payload, secret);
     if (!constantTimeEqual(expected, base64UrlToBytes(signature))) return null;
     const decoded = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload))) as Partial<Session>;
-    if (typeof decoded.member !== 'string' || (decoded.role !== 'admin' && decoded.role !== 'member') || typeof decoded.exp !== 'number' || decoded.exp <= Date.now() / 1000) return null;
+    if (typeof decoded.member !== 'string' || (decoded.role !== 'admin' && decoded.role !== 'member') || typeof decoded.sessionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded.sessionId) || typeof decoded.exp !== 'number' || decoded.exp <= Date.now() / 1000) return null;
     const { members, paperOwner } = await import('@/lib/config').then(({ teamConfig }) => teamConfig());
     const expectedRole: SessionRole = decoded.member === paperOwner ? 'admin' : 'member';
     if (!members.includes(decoded.member) || decoded.role !== expectedRole) return null;
-    return { member: decoded.member, role: decoded.role, exp: decoded.exp };
+    return { member: decoded.member, role: decoded.role, sessionId: decoded.sessionId, exp: decoded.exp };
   } catch { return null; }
 }
 

@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from 'react';
 import {
-  ArchiveRestore, CheckCircle2, Clock3, Code2, Download, FileArchive,
+  Activity, ArchiveRestore, CheckCircle2, Clock3, Code2, Download, FileArchive,
   FileText, GitCommitHorizontal, LogIn, LogOut, Menu, Plus, RefreshCw, Search,
-  ShieldCheck, UploadCloud, Users, X,
+  ShieldCheck, UploadCloud, Users, Wifi, WifiOff, X,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { AuditEvent, Category, Summary, VersionEntry } from '@/lib/types';
+import type { AuditEvent, Category, PresenceSummary, Summary, VersionEntry } from '@/lib/types';
 
 const categoryLabels: Record<Category, string> = {
   'paper-main': '论文主稿', 'paper-revision': '论文修改稿', code: '代码',
@@ -36,6 +36,18 @@ const demoAuditEvents: AuditEvent[] = [
   { event_id: 'audit-demo-2', event_type: 'download', member: '成员二', timestamp_beijing: '2026-09-06T16:08:00+08:00', original_name: 'model-code.zip', repository_path: 'code/code-v027-model-code.zip', version: 'v027', category: 'code' },
   { event_id: 'audit-demo-1', event_type: 'login', member: '成员三', timestamp_beijing: '2026-09-06T16:02:00+08:00', original_name: null, repository_path: null, version: null, category: null },
 ];
+
+const demoPresence: PresenceSummary = {
+  members: [
+    { member: '成员一', online: true, online_at: '2026-09-06T15:40:00+08:00', last_active_at: '2026-09-06T16:10:00+08:00' },
+    { member: '成员二', online: false, online_at: '2026-09-06T14:20:00+08:00', last_active_at: '2026-09-06T15:05:00+08:00' },
+    { member: '成员三', online: false, online_at: null, last_active_at: null },
+  ],
+  records: [
+    { presence_id: 'presence-demo-1', member: '成员一', online_at: '2026-09-06T15:40:00+08:00', last_active_at: '2026-09-06T16:10:00+08:00', online: true },
+    { presence_id: 'presence-demo-2', member: '成员二', online_at: '2026-09-06T14:20:00+08:00', last_active_at: '2026-09-06T15:05:00+08:00', online: false },
+  ],
+};
 
 async function responseError(response: Response, fallback: string) {
   const body = await response.json() as { error?: unknown };
@@ -107,6 +119,34 @@ function AccessAuditLogs({ preview, isAdmin }: { preview: boolean; isAdmin: bool
   </>}</>;
 }
 
+function MemberPresencePanel({ preview }: { preview: boolean }) {
+  const [presence, setPresence] = useState<PresenceSummary | null>(preview ? demoPresence : null);
+  const [error, setError] = useState('');
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/api/presence', { cache: 'no-store' });
+      if (!response.ok) throw new Error(await responseError(response, '成员在线记录加载失败'));
+      setPresence(await response.json() as PresenceSummary); setError('');
+    } catch (reason) { if (!preview) setError(reason instanceof Error ? reason.message : '成员在线记录加载失败'); }
+  }, [preview]);
+  useEffect(() => {
+    if (preview) return;
+    const initial = window.setTimeout(() => { void load(); }, 0);
+    const timer = window.setInterval(() => { void load(); }, 5 * 60 * 1000);
+    const refresh = () => { void load(); };
+    window.addEventListener('presence-updated', refresh);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); window.removeEventListener('presence-updated', refresh); };
+  }, [load, preview]);
+  return <section className="mt-9 overflow-hidden rounded-2xl border bg-card shadow-[0_14px_40px_rgb(18_45_85/5%)]"><div className="border-b p-5"><div className="flex items-center gap-2"><Activity className="size-5 text-primary" /><h2 className="text-xl font-bold">成员在线记录</h2></div></div>
+    {error ? <p role="alert" className="p-5 text-sm text-destructive">{error}</p> : !presence ? <div className="grid place-items-center py-14"><RefreshCw className="size-6 animate-spin text-primary" /><span className="sr-only">正在加载成员在线记录</span></div> : <>
+      <div className="grid gap-3 border-b p-5 sm:grid-cols-3">{presence.members.map((item) => <article key={item.member} className="rounded-xl border bg-muted/20 p-4"><div className="flex items-center justify-between gap-3"><p className="font-semibold">{item.member}</p><Badge variant={item.online ? 'secondary' : 'outline'} className={item.online ? 'bg-emerald-50 text-emerald-700' : ''}>{item.online ? <Wifi /> : <WifiOff />}{item.online ? '在线' : '离线'}</Badge></div><dl className="mt-4 space-y-2 text-sm"><div className="flex justify-between gap-3"><dt className="text-muted-foreground">上线时间</dt><dd>{item.online_at ? formatTime(item.online_at) : '—'}</dd></div><div className="flex justify-between gap-3"><dt className="text-muted-foreground">最后活跃</dt><dd>{item.last_active_at ? formatTime(item.last_active_at) : '—'}</dd></div></dl></article>)}</div>
+      <div className="hidden md:block"><Table><TableHeader><TableRow><TableHead className="pl-5">成员</TableHead><TableHead>上线时间</TableHead><TableHead>最后活跃</TableHead><TableHead className="pr-5">状态</TableHead></TableRow></TableHeader><TableBody>{presence.records.map((record) => <TableRow key={record.presence_id}><TableCell className="pl-5 font-medium">{record.member}</TableCell><TableCell className="text-muted-foreground">{formatTime(record.online_at)}</TableCell><TableCell className="text-muted-foreground">{formatTime(record.last_active_at)}</TableCell><TableCell className="pr-5"><span className={`inline-flex items-center gap-2 text-sm ${record.online ? 'text-emerald-700' : 'text-muted-foreground'}`}><span className={`size-2 rounded-full ${record.online ? 'bg-emerald-500' : 'bg-slate-300'}`} />{record.online ? '在线' : '离线'}</span></TableCell></TableRow>)}</TableBody></Table></div>
+      <div className="divide-y md:hidden">{presence.records.map((record) => <article key={record.presence_id} className="p-5"><div className="flex items-center justify-between gap-3"><span className="font-medium">{record.member}</span><span className={`inline-flex items-center gap-2 text-sm ${record.online ? 'text-emerald-700' : 'text-muted-foreground'}`}><span className={`size-2 rounded-full ${record.online ? 'bg-emerald-500' : 'bg-slate-300'}`} />{record.online ? '在线' : '离线'}</span></div><p className="mt-3 text-sm text-muted-foreground">上线 {formatTime(record.online_at)} · 最后活跃 {formatTime(record.last_active_at)}</p></article>)}</div>
+      {presence.records.length === 0 && <div className="grid place-items-center px-5 py-14 text-center"><Activity className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">暂无在线记录</p></div>}
+    </>}
+  </section>;
+}
+
 function LoginPanel({ onSuccess, preview }: { onSuccess: () => void; preview: boolean }) {
   const [members, setMembers] = useState<string[]>(preview ? demoSummary.members : []);
   const [member, setMember] = useState(preview ? demoSummary.members[0] : '');
@@ -163,6 +203,23 @@ export function VersionWorkspace({ preview }: { preview: boolean }) {
     const timer = window.setTimeout(() => { void loadSummary(); }, 0);
     return () => window.clearTimeout(timer);
   }, [preview, loadSummary]);
+  useEffect(() => {
+    if (preview || !authenticated) return;
+    const heartbeat = async () => {
+      try {
+        const response = await fetch('/api/presence', { method: 'POST', cache: 'no-store', keepalive: true });
+        if (response.status === 401) { setAuthenticated(false); return; }
+        if (response.ok) window.dispatchEvent(new Event('presence-updated'));
+      } catch { /* The next scheduled heartbeat retries. */ }
+    };
+    void heartbeat();
+    const timer = window.setInterval(() => { void heartbeat(); }, 5 * 60 * 1000);
+    const resume = () => { if (document.visibilityState === 'visible') void heartbeat(); };
+    const online = () => { void heartbeat(); };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('online', online);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', resume); window.removeEventListener('online', online); };
+  }, [authenticated, preview]);
   const entries = useMemo(() => (summary?.entries ?? []).filter((entry) => {
     const categoryMatches = category === 'all' || entry.category === category;
     const text = `${entry.version} ${entry.member} ${entry.original_name} ${entry.description}`.toLowerCase();
@@ -205,7 +262,7 @@ export function VersionWorkspace({ preview }: { preview: boolean }) {
         <div className="hidden md:block"><Table><TableHeader><TableRow><TableHead className="pl-5">版本</TableHead><TableHead>文件与说明</TableHead><TableHead>成员</TableHead><TableHead>时间</TableHead><TableHead className="pr-5 text-right">操作</TableHead></TableRow></TableHeader><TableBody>{entries.map((entry) => <TableRow key={entry.event_id}><TableCell className="pl-5"><div className="flex items-center gap-2"><Badge variant="outline">{entry.version}</Badge><span className="text-xs text-muted-foreground">{categoryLabels[entry.category]}</span></div></TableCell><TableCell className="max-w-md whitespace-normal"><p className="font-medium">{entry.original_name}</p><p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{entry.description}</p></TableCell><TableCell>{entry.member}</TableCell><TableCell className="text-muted-foreground">{formatTime(entry.timestamp_beijing)}</TableCell><TableCell className="pr-5 text-right"><Button nativeButton={false} variant="ghost" size="icon-sm" aria-label={`下载 ${entry.version}`} render={<a aria-label={`下载 ${entry.version}`} href={`/api/files?path=${encodeURIComponent(entry.repository_path ?? '')}`} />}><Download /></Button><Button variant="ghost" size="icon-sm" aria-label={`恢复 ${entry.version}`} onClick={() => setRestoreEntry(entry)}><ArchiveRestore /></Button></TableCell></TableRow>)}</TableBody></Table></div>
         <div className="divide-y md:hidden">{entries.map((entry) => <article key={entry.event_id} className="p-5"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Badge variant="outline">{entry.version}</Badge><span className="text-xs text-muted-foreground">{categoryLabels[entry.category]}</span></div><span className="text-xs text-muted-foreground">{formatTime(entry.timestamp_beijing)}</span></div><h3 className="mt-3 font-medium">{entry.original_name}</h3><p className="mt-1 text-sm leading-6 text-muted-foreground">{entry.description}</p><div className="mt-3 flex items-center justify-between"><span className="text-sm">{entry.member} · {formatSize(entry.size_bytes)}</span><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setRestoreEntry(entry)}><ArchiveRestore />恢复</Button><Button nativeButton={false} size="sm" variant="outline" render={<a aria-label={`下载 ${entry.version}`} href={`/api/files?path=${encodeURIComponent(entry.repository_path ?? '')}`} />}><Download />下载</Button></div></div></article>)}</div>
         {entries.length === 0 && <div className="grid place-items-center px-5 py-16 text-center"><FileArchive className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">没有匹配的版本</p><p className="mt-1 text-sm text-muted-foreground">换一个类别或搜索词试试。</p></div>}
-      </section><AccessAuditLogs preview={preview} isAdmin={summary?.viewer?.role === 'admin'} /></main>
+      </section><AccessAuditLogs preview={preview} isAdmin={summary?.viewer?.role === 'admin'} />{summary?.viewer?.role === 'admin' && <MemberPresencePanel preview={preview} />}</main>
     <UploadDialog open={uploadOpen} onOpenChange={setUploadOpen} summary={summary ?? demoSummary} preview={preview} onUploaded={() => { setUploadOpen(false); setNotice('新版本已提交到 GitHub。'); void loadSummary(); }} />
     <RestoreDialog entry={restoreEntry} onOpenChange={(open) => { if (!open) setRestoreEntry(null); }} summary={summary ?? demoSummary} preview={preview} onRestored={() => { setRestoreEntry(null); setNotice('历史文件已恢复为新的最新版本。'); void loadSummary(); }} />
   </div>;
