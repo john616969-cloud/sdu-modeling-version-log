@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from 'react';
 import {
   ArchiveRestore, CheckCircle2, Clock3, Code2, Download, FileArchive,
-  FileText, GitCommitHorizontal, LogOut, Menu, Plus, RefreshCw, Search,
+  FileText, GitCommitHorizontal, LogIn, LogOut, Menu, Plus, RefreshCw, Search,
   ShieldCheck, UploadCloud, Users, X,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { Category, Summary, VersionEntry } from '@/lib/types';
+import type { AuditEvent, Category, Summary, VersionEntry } from '@/lib/types';
 
 const categoryLabels: Record<Category, string> = {
   'paper-main': '论文主稿', 'paper-revision': '论文修改稿', code: '代码',
@@ -29,7 +29,13 @@ const demoEntries: VersionEntry[] = [
 const demoSummary: Summary = {
   members: ['成员一', '成员二', '成员三'], paperOwner: '成员一',
   latest: { 'paper-main': demoEntries[0], code: demoEntries[1], 'paper-revision': demoEntries[2] }, entries: demoEntries,
+  viewer: { member: '成员一', role: 'admin' },
 };
+
+const demoAuditEvents: AuditEvent[] = [
+  { event_id: 'audit-demo-2', event_type: 'download', member: '成员二', timestamp_beijing: '2026-09-06T16:08:00+08:00', original_name: 'model-code.zip', repository_path: 'code/code-v027-model-code.zip', version: 'v027', category: 'code' },
+  { event_id: 'audit-demo-1', event_type: 'login', member: '成员三', timestamp_beijing: '2026-09-06T16:02:00+08:00', original_name: null, repository_path: null, version: null, category: null },
+];
 
 async function responseError(response: Response, fallback: string) {
   const body = await response.json() as { error?: unknown };
@@ -68,20 +74,68 @@ function LatestCard({ entry, kind }: { entry?: VersionEntry; kind: 'paper' | 'co
   );
 }
 
-function LoginPanel({ onSuccess }: { onSuccess: () => void }) {
+function AccessAuditLogs({ preview, isAdmin }: { preview: boolean; isAdmin: boolean }) {
+  const [events, setEvents] = useState<AuditEvent[]>(preview ? demoAuditEvents : []);
+  const [loading, setLoading] = useState(!preview);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (preview) return;
+    const controller = new AbortController();
+    void fetch('/api/audit', { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response, '访问日志加载失败'));
+        const body = await response.json() as { events?: AuditEvent[] };
+        setEvents(Array.isArray(body.events) ? body.events : []);
+      })
+      .catch((reason) => { if (reason instanceof Error && reason.name !== 'AbortError') setError(reason.message); })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [preview]);
+  const downloads = events.filter((event) => event.event_type === 'download');
+  const logins = events.filter((event) => event.event_type === 'login');
+  return <>{loading ? <section className="mt-9 grid place-items-center rounded-2xl border bg-card py-14"><RefreshCw className="size-6 animate-spin text-primary" /><span className="sr-only">正在加载日志</span></section> : error ? <p role="alert" className="mt-9 rounded-2xl border bg-card p-5 text-sm text-destructive">{error}</p> : <>
+    <section className="mt-9 overflow-hidden rounded-2xl border bg-card shadow-[0_14px_40px_rgb(18_45_85/5%)]"><div className="border-b p-5"><div className="flex items-center gap-2"><Download className="size-5 text-primary" /><h2 className="text-xl font-bold">下载日志</h2></div></div>
+      <div className="hidden md:block"><Table><TableHeader><TableRow><TableHead className="pl-5">时间</TableHead><TableHead>成员</TableHead><TableHead className="pr-5">文件</TableHead></TableRow></TableHeader><TableBody>{downloads.map((event) => <TableRow key={event.event_id}><TableCell className="pl-5 text-muted-foreground">{formatTime(event.timestamp_beijing)}</TableCell><TableCell>{event.member}</TableCell><TableCell className="pr-5"><p className="font-medium">{event.original_name}</p><p className="mt-1 text-xs text-muted-foreground">{event.version ? `${event.version} · ${event.category ? categoryLabels[event.category] : ''}` : event.repository_path}</p></TableCell></TableRow>)}</TableBody></Table></div>
+      <div className="divide-y md:hidden">{downloads.map((event) => <article key={event.event_id} className="p-5"><div className="flex items-center justify-between gap-3"><span className="font-medium">{event.member}</span><span className="text-xs text-muted-foreground">{formatTime(event.timestamp_beijing)}</span></div><div className="mt-3 flex items-center gap-2"><Download className="size-4 text-primary" /><span className="text-sm">{event.original_name ?? '文件'}</span>{event.version && <Badge variant="outline">{event.version}</Badge>}</div></article>)}</div>
+      {downloads.length === 0 && <div className="grid place-items-center px-5 py-14 text-center"><Download className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">暂无下载记录</p></div>}
+    </section>
+    {isAdmin && <section className="mt-9 overflow-hidden rounded-2xl border bg-card shadow-[0_14px_40px_rgb(18_45_85/5%)]"><div className="border-b p-5"><div className="flex items-center gap-2"><ShieldCheck className="size-5 text-primary" /><h2 className="text-xl font-bold">登录日志</h2></div></div>
+      <div className="hidden md:block"><Table><TableHeader><TableRow><TableHead className="pl-5">时间</TableHead><TableHead className="pr-5">成员</TableHead></TableRow></TableHeader><TableBody>{logins.map((event) => <TableRow key={event.event_id}><TableCell className="pl-5 text-muted-foreground">{formatTime(event.timestamp_beijing)}</TableCell><TableCell className="pr-5">{event.member}</TableCell></TableRow>)}</TableBody></Table></div>
+      <div className="divide-y md:hidden">{logins.map((event) => <article key={event.event_id} className="flex items-center justify-between gap-3 p-5"><span className="flex items-center gap-2 font-medium"><LogIn className="size-4 text-primary" />{event.member}</span><span className="text-xs text-muted-foreground">{formatTime(event.timestamp_beijing)}</span></article>)}</div>
+      {logins.length === 0 && <div className="grid place-items-center px-5 py-14 text-center"><LogIn className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">暂无登录记录</p></div>}
+    </section>}
+  </>}</>;
+}
+
+function LoginPanel({ onSuccess, preview }: { onSuccess: () => void; preview: boolean }) {
+  const [members, setMembers] = useState<string[]>(preview ? demoSummary.members : []);
+  const [member, setMember] = useState(preview ? demoSummary.members[0] : '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (preview) return;
+    const controller = new AbortController();
+    void fetch('/api/auth/login', { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('成员名单加载失败');
+        const body = await response.json() as { members?: string[] };
+        const names = Array.isArray(body.members) ? body.members : [];
+        setMembers(names); setMember((current) => current || names[0] || '');
+      })
+      .catch((reason) => { if (reason instanceof Error && reason.name !== 'AbortError') setError(reason.message); });
+    return () => controller.abort();
+  }, [preview]);
   async function login(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) });
+      const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ member, password }) });
       if (!response.ok) throw new Error(await responseError(response, '密码不正确'));
       onSuccess();
     } catch (reason) { setError(reason instanceof Error ? reason.message : '登录失败'); }
     finally { setBusy(false); }
   }
-  return <main className="grid min-h-screen place-items-center px-5 py-10"><section className="w-full max-w-md overflow-hidden rounded-3xl border bg-card shadow-[0_30px_90px_rgb(20_54_100/15%)]"><div className="bg-[#15355f] px-7 py-8 text-white"><div className="mb-8 flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-amber-300 text-[#15355f]"><GitCommitHorizontal /></div><span className="text-sm font-semibold tracking-[0.16em] text-blue-100">2026 · 数学建模</span></div><h1 className="text-3xl font-bold tracking-tight">数模版本站</h1><p className="mt-2 text-base leading-7 text-blue-100">统一上传，自动编号。只从这里拿最新版。</p></div><form onSubmit={login} className="space-y-5 p-7"><div><label htmlFor="password" className="mb-2 block text-sm font-medium">团队公共密码</label><Input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-11" required /></div>{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<Button type="submit" className="h-11 w-full" disabled={busy}>{busy ? <RefreshCw className="animate-spin" /> : <ShieldCheck />}{busy ? '正在验证' : '进入版本站'}</Button><p className="text-center text-xs leading-5 text-muted-foreground">登录后将在此设备保持 7 天。使用公共电脑时请主动退出。</p></form></section></main>;
+  return <main className="grid min-h-screen place-items-center px-5 py-10"><section className="w-full max-w-md overflow-hidden rounded-3xl border bg-card shadow-[0_30px_90px_rgb(20_54_100/15%)]"><div className="bg-[#15355f] px-7 py-8 text-white"><div className="mb-8 flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-amber-300 text-[#15355f]"><GitCommitHorizontal /></div><span className="text-sm font-semibold tracking-[0.16em] text-blue-100">2026 · 数学建模</span></div><h1 className="text-3xl font-bold tracking-tight">数模版本站</h1><p className="mt-2 text-base leading-7 text-blue-100">统一上传，自动编号。只从这里拿最新版。</p></div><form onSubmit={login} className="space-y-5 p-7"><div><p className="mb-2 text-sm font-medium">成员姓名</p><Select value={member} onValueChange={(value) => setMember(typeof value === 'string' ? value : '')}><SelectTrigger aria-label="成员姓名" className="h-11 w-full"><SelectValue placeholder="请选择姓名" /></SelectTrigger><SelectContent>{members.map((name) => <SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div><div><label htmlFor="password" className="mb-2 block text-sm font-medium">登录密码</label><Input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-11" required /></div>{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<Button type="submit" className="h-11 w-full" disabled={busy || !member}>{busy ? <RefreshCw className="animate-spin" /> : <ShieldCheck />}{busy ? '正在验证' : '进入版本站'}</Button><p className="text-center text-xs leading-5 text-muted-foreground">登录后将在此设备保持 7 天。使用公共电脑时请主动退出。</p></form></section></main>;
 }
 
 export function VersionWorkspace({ preview }: { preview: boolean }) {
@@ -141,17 +195,17 @@ export function VersionWorkspace({ preview }: { preview: boolean }) {
     return () => lifecycle.abort();
   }, [entries]);
   if (loading && !summary) return <main className="grid min-h-screen place-items-center"><RefreshCw className="size-7 animate-spin text-primary" /><span className="sr-only">正在加载</span></main>;
-  if (!authenticated) return <LoginPanel onSuccess={() => void loadSummary()} />;
+  if (!authenticated) return <LoginPanel preview={preview} onSuccess={() => void loadSummary()} />;
   return <div className="min-h-screen">
     <header className="sticky top-0 z-30 border-b bg-white/90 backdrop-blur-xl"><div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8"><div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-xl bg-[#15355f] text-amber-300"><GitCommitHorizontal className="size-5" /></div><div><p className="font-bold leading-5">数模版本站</p><p className="text-xs text-muted-foreground">2026 高教社杯</p></div></div><div className="hidden items-center gap-3 sm:flex"><span className="flex items-center gap-2 text-sm text-muted-foreground"><span className="size-2 rounded-full bg-emerald-500" />GitHub 已连接</span><Button variant="ghost" size="icon" aria-label="退出登录" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); setAuthenticated(false); }}><LogOut /></Button></div><Button className="sm:hidden" variant="ghost" size="icon" aria-label="打开菜单" onClick={() => setMobileOpen(!mobileOpen)}>{mobileOpen ? <X /> : <Menu />}</Button></div>{mobileOpen && <div className="border-t bg-card px-4 py-3 sm:hidden"><Button variant="ghost" className="w-full justify-start" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); setAuthenticated(false); }}><LogOut />退出登录</Button></div>}</header>
     <main className="mx-auto max-w-[1440px] px-4 py-7 sm:px-6 lg:px-8 lg:py-10"><section className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="mb-2 flex items-center gap-2 text-sm font-medium text-primary"><CheckCircle2 className="size-4" />资料已按版本归档</div><h1 className="text-3xl font-bold tracking-tight sm:text-4xl">今天交付哪一版？</h1><p className="mt-2 text-base text-muted-foreground">主稿和代码以本页显示的版本为准。</p></div><Button size="lg" className="h-11 px-5 shadow-lg shadow-blue-900/10" onClick={() => setUploadOpen(true)}><Plus />上传新版本</Button></section>
       {notice && <output className="mt-5 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="关闭提示"><X className="size-4" /></button></output>}
       <section className="mt-7 grid gap-4 lg:grid-cols-2"><LatestCard entry={summary?.latest['paper-main']} kind="paper" /><LatestCard entry={summary?.latest.code} kind="code" /></section>
-      <section className="mt-9 overflow-hidden rounded-2xl border bg-card shadow-[0_14px_40px_rgb(18_45_85/5%)]"><div className="flex flex-col gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-xl font-bold">版本日志</h2><p className="mt-1 text-sm text-muted-foreground">每次上传和恢复都会留下记录。</p></div><div className="flex flex-col gap-2 sm:flex-row"><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索日志" placeholder="搜索版本、成员或说明" value={query} onChange={(event) => setQuery(event.target.value)} className="h-9 pl-9 sm:w-60" /></div><Select value={category} onValueChange={(value) => setCategory(typeof value === 'string' ? value as 'all' | Category : 'all')}><SelectTrigger className="h-9 w-full sm:w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类别</SelectItem>{Object.entries(categoryLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div></div>
+      <section className="mt-9 overflow-hidden rounded-2xl border bg-card shadow-[0_14px_40px_rgb(18_45_85/5%)]"><div className="flex flex-col gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between"><h2 className="text-xl font-bold">版本日志</h2><div className="flex flex-col gap-2 sm:flex-row"><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索日志" placeholder="搜索版本、成员或说明" value={query} onChange={(event) => setQuery(event.target.value)} className="h-9 pl-9 sm:w-60" /></div><Select value={category} onValueChange={(value) => setCategory(typeof value === 'string' ? value as 'all' | Category : 'all')}><SelectTrigger className="h-9 w-full sm:w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类别</SelectItem>{Object.entries(categoryLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div></div>
         <div className="hidden md:block"><Table><TableHeader><TableRow><TableHead className="pl-5">版本</TableHead><TableHead>文件与说明</TableHead><TableHead>成员</TableHead><TableHead>时间</TableHead><TableHead className="pr-5 text-right">操作</TableHead></TableRow></TableHeader><TableBody>{entries.map((entry) => <TableRow key={entry.event_id}><TableCell className="pl-5"><div className="flex items-center gap-2"><Badge variant="outline">{entry.version}</Badge><span className="text-xs text-muted-foreground">{categoryLabels[entry.category]}</span></div></TableCell><TableCell className="max-w-md whitespace-normal"><p className="font-medium">{entry.original_name}</p><p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{entry.description}</p></TableCell><TableCell>{entry.member}</TableCell><TableCell className="text-muted-foreground">{formatTime(entry.timestamp_beijing)}</TableCell><TableCell className="pr-5 text-right"><Button nativeButton={false} variant="ghost" size="icon-sm" aria-label={`下载 ${entry.version}`} render={<a aria-label={`下载 ${entry.version}`} href={`/api/files?path=${encodeURIComponent(entry.repository_path ?? '')}`} />}><Download /></Button><Button variant="ghost" size="icon-sm" aria-label={`恢复 ${entry.version}`} onClick={() => setRestoreEntry(entry)}><ArchiveRestore /></Button></TableCell></TableRow>)}</TableBody></Table></div>
         <div className="divide-y md:hidden">{entries.map((entry) => <article key={entry.event_id} className="p-5"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Badge variant="outline">{entry.version}</Badge><span className="text-xs text-muted-foreground">{categoryLabels[entry.category]}</span></div><span className="text-xs text-muted-foreground">{formatTime(entry.timestamp_beijing)}</span></div><h3 className="mt-3 font-medium">{entry.original_name}</h3><p className="mt-1 text-sm leading-6 text-muted-foreground">{entry.description}</p><div className="mt-3 flex items-center justify-between"><span className="text-sm">{entry.member} · {formatSize(entry.size_bytes)}</span><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setRestoreEntry(entry)}><ArchiveRestore />恢复</Button><Button nativeButton={false} size="sm" variant="outline" render={<a aria-label={`下载 ${entry.version}`} href={`/api/files?path=${encodeURIComponent(entry.repository_path ?? '')}`} />}><Download />下载</Button></div></div></article>)}</div>
         {entries.length === 0 && <div className="grid place-items-center px-5 py-16 text-center"><FileArchive className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">没有匹配的版本</p><p className="mt-1 text-sm text-muted-foreground">换一个类别或搜索词试试。</p></div>}
-      </section></main>
+      </section><AccessAuditLogs preview={preview} isAdmin={summary?.viewer?.role === 'admin'} /></main>
     <UploadDialog open={uploadOpen} onOpenChange={setUploadOpen} summary={summary ?? demoSummary} preview={preview} onUploaded={() => { setUploadOpen(false); setNotice('新版本已提交到 GitHub。'); void loadSummary(); }} />
     <RestoreDialog entry={restoreEntry} onOpenChange={(open) => { if (!open) setRestoreEntry(null); }} summary={summary ?? demoSummary} preview={preview} onRestored={() => { setRestoreEntry(null); setNotice('历史文件已恢复为新的最新版本。'); void loadSummary(); }} />
   </div>;

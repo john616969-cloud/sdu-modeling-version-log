@@ -23,4 +23,16 @@ export type Summary = {
   latest: Partial<Record<Category, VersionEntry>>;
   entries: VersionEntry[];
   repositoryUrl?: string;
+  viewer?: { member: string; role: 'admin' | 'member' };
+};
+
+export type AuditEvent = {
+  event_id: string;
+  event_type: 'login' | 'download';
+  member: string;
+  timestamp_beijing: string;
+  original_name: string | null;
+  repository_path: string | null;
+  version: string | null;
+  category: Category | null;
 };

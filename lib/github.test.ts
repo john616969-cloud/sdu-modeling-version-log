@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getSummary, nextVersion, safeName } from '@/lib/github';
-import type { VersionEntry } from '@/lib/types';
+import { getSummary, nextVersion, prependAuditEvent, safeName } from '@/lib/github';
+import type { AuditEvent, VersionEntry } from '@/lib/types';
 
 const base: VersionEntry = {
   event_id: '1', event_type: 'upload', category: 'code', version: 'v009', member: '测试成员',
@@ -40,5 +40,14 @@ describe('GitHub version helpers', () => {
 
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get('User-Agent')).toBe('sdu-modeling-version-log');
+  });
+
+  it('keeps the newest 500 audit events in reverse chronological order', () => {
+    const event: AuditEvent = { event_id: 'new', event_type: 'login', member: '张怡慧', timestamp_beijing: '2026-09-08T18:00:00+08:00', original_name: null, repository_path: null, version: null, category: null };
+    const oldEvents = Array.from({ length: 500 }, (_, index) => ({ ...event, event_id: `old-${index}` }));
+    const result = prependAuditEvent(oldEvents, event);
+    expect(result).toHaveLength(500);
+    expect(result[0].event_id).toBe('new');
+    expect(result.at(-1)?.event_id).toBe('old-498');
   });
 });

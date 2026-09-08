@@ -1,8 +1,9 @@
 import { categoryFolders, githubConfig } from '@/lib/config';
-import type { Category, Summary, VersionEntry } from '@/lib/types';
+import type { AuditEvent, Category, Summary, VersionEntry } from '@/lib/types';
 
 type GitHubFile = { sha: string; content?: string; encoding?: string; download_url?: string | null; name?: string };
 type LogIndex = { entries: VersionEntry[] };
+type AuditIndex = { events: AuditEvent[] };
 type CategoryState = Partial<Record<Category, { version: string; repository_path: string | null; event_id: string }>>;
 
 function encodePath(path: string) { return path.split('/').map(encodeURIComponent).join('/'); }
@@ -77,6 +78,53 @@ export function nextVersion(entries: VersionEntry[], category: Category) {
 function beijingTimestamp() {
   const formatter = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   return `${formatter.format(new Date()).replace(' ', 'T')}+08:00`;
+}
+
+export function prependAuditEvent(events: AuditEvent[], event: AuditEvent) {
+  return [event, ...events].slice(0, 500);
+}
+
+export async function getAuditEvents() {
+  return (await readJson<AuditIndex>('audit/index.json', undefined, { events: [] })).events;
+}
+
+export async function recordAuditEvent(args: { event_type: AuditEvent['event_type']; member: string; original_name?: string; repository_path?: string }) {
+  const { repository, branch } = githubConfig();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const reference = await github<{ object: { sha: string } }>(`/repos/${repository}/git/ref/heads/${encodePath(branch)}`);
+    const parentSha = reference.object.sha;
+    const parent = await github<{ tree: { sha: string } }>(`/repos/${repository}/git/commits/${parentSha}`);
+    const auditIndex = await readJson<AuditIndex>('audit/index.json', parentSha, { events: [] });
+    const versionIndex = args.repository_path ? await readJson<LogIndex>('logs/index.json', parentSha, { entries: [] }) : { entries: [] };
+    const versionEntry = versionIndex.entries.find((entry) => entry.repository_path === args.repository_path);
+    const timestamp = beijingTimestamp();
+    const event: AuditEvent = {
+      event_id: crypto.randomUUID(),
+      event_type: args.event_type,
+      member: args.member,
+      timestamp_beijing: timestamp,
+      original_name: args.original_name ?? null,
+      repository_path: args.repository_path ?? null,
+      version: versionEntry?.version ?? null,
+      category: versionEntry?.category ?? null,
+    };
+    const events = prependAuditEvent(auditIndex.events, event);
+    const [eventBlob, indexBlob] = await Promise.all([
+      github<{ sha: string }>(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: JSON.stringify(event, null, 2) + '\n', encoding: 'utf-8' }) }),
+      github<{ sha: string }>(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: JSON.stringify({ events }, null, 2) + '\n', encoding: 'utf-8' }) }),
+    ]);
+    const eventPath = `audit/entries/${timestamp.replace(/[-:+]/g, '').replace('T', '-')}-${event.event_id.slice(0, 8)}-${event.event_type}.json`;
+    const tree = await github<{ sha: string }>(`/repos/${repository}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: parent.tree.sha, tree: [
+      { path: eventPath, mode: '100644', type: 'blob', sha: eventBlob.sha },
+      { path: 'audit/index.json', mode: '100644', type: 'blob', sha: indexBlob.sha },
+    ] }) });
+    const commit = await github<{ sha: string }>(`/repos/${repository}/git/commits`, { method: 'POST', body: JSON.stringify({ message: `[audit] ${args.member} ${args.event_type}`, tree: tree.sha, parents: [parentSha] }) });
+    try {
+      await github(`/repos/${repository}/git/refs/heads/${encodePath(branch)}`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }) });
+      return event;
+    } catch (error) { if ((error as { status?: number }).status !== 422 || attempt === 2) throw error; }
+  }
+  throw new Error('审计日志并发写入失败。');
 }
 
 async function sha256(bytes: Uint8Array) {
