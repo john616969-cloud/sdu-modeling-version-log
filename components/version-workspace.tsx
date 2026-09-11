@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import {
   Activity, ArchiveRestore, CheckCircle2, Clock3, Code2, Download, FileArchive,
   FileText, GitCommitHorizontal, LogIn, LogOut, Menu, Plus, RefreshCw, Search,
@@ -14,6 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import type { AuditEvent, Category, PresenceSummary, Summary, VersionEntry } from '@/lib/types';
+import { MAX_UPLOAD_BYTES } from '@/lib/upload';
+import { newVersionNotice } from '@/lib/version-refresh';
 
 const categoryLabels: Record<Category, string> = {
   'paper-main': '论文主稿', 'paper-revision': '论文修改稿', code: '代码',
@@ -188,21 +190,35 @@ export function VersionWorkspace({ preview }: { preview: boolean }) {
   const [category, setCategory] = useState<'all' | Category>('all');
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState('');
-  const loadSummary = useCallback(async () => {
-    setLoading(true);
+  const latestSeenEventId = useRef<string | null>(preview ? demoSummary.entries[0]?.event_id ?? null : null);
+  const loadSummary = useCallback(async ({ background = false, announce = false }: { background?: boolean; announce?: boolean } = {}) => {
+    if (!background) setLoading(true);
     try {
       const response = await fetch('/api/summary', { cache: 'no-store' });
       if (response.status === 401) { setAuthenticated(false); return; }
       if (!response.ok) throw new Error(await responseError(response, '加载失败'));
-      setSummary(await response.json()); setAuthenticated(true);
-    } catch (reason) { if (!preview) setNotice(reason instanceof Error ? reason.message : '加载失败'); }
-    finally { setLoading(false); }
+      const next = await response.json() as Summary;
+      const updateNotice = announce ? newVersionNotice(latestSeenEventId.current, next.entries) : null;
+      latestSeenEventId.current = next.entries[0]?.event_id ?? null;
+      setSummary(next); setAuthenticated(true);
+      if (updateNotice) setNotice(updateNotice);
+    } catch (reason) { if (!preview && !background) setNotice(reason instanceof Error ? reason.message : '加载失败'); }
+    finally { if (!background) setLoading(false); }
   }, [preview]);
   useEffect(() => {
     if (preview) return;
     const timer = window.setTimeout(() => { void loadSummary(); }, 0);
     return () => window.clearTimeout(timer);
   }, [preview, loadSummary]);
+  useEffect(() => {
+    if (preview || !authenticated || uploadOpen || restoreEntry) return;
+    const refresh = () => { void loadSummary({ background: true, announce: true }); };
+    const timer = window.setInterval(refresh, 30 * 1000);
+    const resume = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('online', refresh);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', resume); window.removeEventListener('online', refresh); };
+  }, [authenticated, loadSummary, preview, restoreEntry, uploadOpen]);
   useEffect(() => {
     if (preview || !authenticated) return;
     const heartbeat = async () => {
@@ -263,12 +279,12 @@ export function VersionWorkspace({ preview }: { preview: boolean }) {
         <div className="divide-y md:hidden">{entries.map((entry) => <article key={entry.event_id} className="p-5"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Badge variant="outline">{entry.version}</Badge><span className="text-xs text-muted-foreground">{categoryLabels[entry.category]}</span></div><span className="text-xs text-muted-foreground">{formatTime(entry.timestamp_beijing)}</span></div><h3 className="mt-3 font-medium">{entry.original_name}</h3><p className="mt-1 text-sm leading-6 text-muted-foreground">{entry.description}</p><div className="mt-3 flex items-center justify-between"><span className="text-sm">{entry.member} · {formatSize(entry.size_bytes)}</span><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setRestoreEntry(entry)}><ArchiveRestore />恢复</Button><Button nativeButton={false} size="sm" variant="outline" render={<a aria-label={`下载 ${entry.version}`} href={`/api/files?path=${encodeURIComponent(entry.repository_path ?? '')}`} />}><Download />下载</Button></div></div></article>)}</div>
         {entries.length === 0 && <div className="grid place-items-center px-5 py-16 text-center"><FileArchive className="size-9 text-muted-foreground" /><p className="mt-3 font-medium">没有匹配的版本</p><p className="mt-1 text-sm text-muted-foreground">换一个类别或搜索词试试。</p></div>}
       </section><AccessAuditLogs preview={preview} isAdmin={summary?.viewer?.role === 'admin'} />{summary?.viewer?.role === 'admin' && <MemberPresencePanel preview={preview} />}</main>
-    <UploadDialog open={uploadOpen} onOpenChange={setUploadOpen} summary={summary ?? demoSummary} preview={preview} onUploaded={() => { setUploadOpen(false); setNotice('新版本已提交到 GitHub。'); void loadSummary(); }} />
-    <RestoreDialog entry={restoreEntry} onOpenChange={(open) => { if (!open) setRestoreEntry(null); }} summary={summary ?? demoSummary} preview={preview} onRestored={() => { setRestoreEntry(null); setNotice('历史文件已恢复为新的最新版本。'); void loadSummary(); }} />
+    <UploadDialog open={uploadOpen} onOpenChange={setUploadOpen} summary={summary ?? demoSummary} preview={preview} onUploaded={(entry) => { latestSeenEventId.current = entry.event_id; setUploadOpen(false); setNotice('新版本已提交到 GitHub。'); void loadSummary({ background: true }); }} />
+    <RestoreDialog entry={restoreEntry} onOpenChange={(open) => { if (!open) setRestoreEntry(null); }} summary={summary ?? demoSummary} preview={preview} onRestored={(entry) => { latestSeenEventId.current = entry.event_id; setRestoreEntry(null); setNotice('历史文件已恢复为新的最新版本。'); void loadSummary({ background: true }); }} />
   </div>;
 }
 
-function UploadDialog({ open, onOpenChange, summary, preview, onUploaded }: { open: boolean; onOpenChange: (open: boolean) => void; summary: Summary; preview: boolean; onUploaded: () => void }) {
+function UploadDialog({ open, onOpenChange, summary, preview, onUploaded }: { open: boolean; onOpenChange: (open: boolean) => void; summary: Summary; preview: boolean; onUploaded: (entry: VersionEntry) => void }) {
   const [member, setMember] = useState(summary.members[0] ?? '');
   const [category, setCategory] = useState<Category>('paper-revision');
   const [description, setDescription] = useState('');
@@ -279,7 +295,7 @@ function UploadDialog({ open, onOpenChange, summary, preview, onUploaded }: { op
   async function submit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');
     if (!file) return setError('请选择要上传的文件');
-    if (file.size > 20 * 1024 * 1024) return setError('单个文件不能超过 20 MB');
+    if (file.size > MAX_UPLOAD_BYTES) return setError('单个文件不能超过 50 MB');
     if (description.trim().length < 4) return setError('请具体说明这次修改了什么');
     if (category === 'paper-main' && !canUploadMain) return setError('只有论文负责人可以上传论文主稿');
     if (preview) { setError('预览模式不会写入仓库，部署配置完成后即可上传。'); return; }
@@ -288,14 +304,15 @@ function UploadDialog({ open, onOpenChange, summary, preview, onUploaded }: { op
       const form = new FormData(); form.set('member', member); form.set('category', category); form.set('description', description); form.set('file', file);
       const response = await fetch('/api/upload', { method: 'POST', body: form });
       if (!response.ok) throw new Error(await responseError(response, '上传失败'));
-      onUploaded(); setDescription(''); setFile(null);
+      const body = await response.json() as { entry: VersionEntry };
+      onUploaded(body.entry); setDescription(''); setFile(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : '上传失败'); }
     finally { setBusy(false); }
   }
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle className="text-xl">上传新版本</DialogTitle><DialogDescription>提交成功后会自动生成版本号并写入 GitHub，已有文件不会被覆盖。</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div><p className="mb-2 text-sm font-medium">上传成员</p><Select value={member} onValueChange={(value) => setMember(typeof value === 'string' ? value : '')}><SelectTrigger aria-label="上传成员" className="h-10 w-full"><SelectValue /></SelectTrigger><SelectContent>{summary.members.map((name) => <SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div><div><p className="mb-2 text-sm font-medium">文件类别</p><Select value={category} onValueChange={(value) => { if (typeof value === 'string') setCategory(value as Category); }}><SelectTrigger aria-label="文件类别" className="h-10 w-full"><SelectValue /></SelectTrigger><SelectContent>{Object.entries(categoryLabels).map(([value, label]) => <SelectItem value={value} key={value} disabled={value === 'paper-main' && !canUploadMain}>{label}</SelectItem>)}</SelectContent></Select></div><div><label htmlFor="file" className="mb-2 block text-sm font-medium">选择文件</label><label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed bg-muted/35 px-4 text-center transition hover:border-primary/50 hover:bg-muted/60"><UploadCloud className="mb-2 size-7 text-primary" /><span className="text-sm font-medium">{file ? file.name : '点击选择文件'}</span><span className="mt-1 text-xs text-muted-foreground">最大 20 MB；代码请先打包为 ZIP</span><input id="file" type="file" className="sr-only" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><div><label htmlFor="description" className="mb-2 block text-sm font-medium">修改说明</label><Textarea id="description" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：补全模型检验，修正表 3 单位，待检查参考文献。" className="min-h-24" /></div>{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter className="mt-5"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button type="submit" disabled={busy}>{busy ? <RefreshCw className="animate-spin" /> : <UploadCloud />}{busy ? '正在提交' : '确认上传'}</Button></DialogFooter></form></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle className="text-xl">上传新版本</DialogTitle><DialogDescription>提交成功后会自动生成版本号并写入 GitHub，已有文件不会被覆盖。</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div><p className="mb-2 text-sm font-medium">上传成员</p><Select value={member} onValueChange={(value) => setMember(typeof value === 'string' ? value : '')}><SelectTrigger aria-label="上传成员" className="h-10 w-full"><SelectValue /></SelectTrigger><SelectContent>{summary.members.map((name) => <SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div><div><p className="mb-2 text-sm font-medium">文件类别</p><Select value={category} onValueChange={(value) => { if (typeof value === 'string') setCategory(value as Category); }}><SelectTrigger aria-label="文件类别" className="h-10 w-full"><SelectValue /></SelectTrigger><SelectContent>{Object.entries(categoryLabels).map(([value, label]) => <SelectItem value={value} key={value} disabled={value === 'paper-main' && !canUploadMain}>{label}</SelectItem>)}</SelectContent></Select></div><div><label htmlFor="file" className="mb-2 block text-sm font-medium">选择文件</label><label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed bg-muted/35 px-4 text-center transition hover:border-primary/50 hover:bg-muted/60"><UploadCloud className="mb-2 size-7 text-primary" /><span className="text-sm font-medium">{file ? file.name : '点击选择文件'}</span><span className="mt-1 text-xs text-muted-foreground">最大 50 MB；代码请先打包为 ZIP</span><input id="file" type="file" className="sr-only" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label></div><div><label htmlFor="description" className="mb-2 block text-sm font-medium">修改说明</label><Textarea id="description" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：补全模型检验，修正表 3 单位，待检查参考文献。" className="min-h-24" /></div>{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter className="mt-5"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button type="submit" disabled={busy}>{busy ? <RefreshCw className="animate-spin" /> : <UploadCloud />}{busy ? '正在提交' : '确认上传'}</Button></DialogFooter></form></DialogContent></Dialog>;
 }
 
-function RestoreDialog({ entry, onOpenChange, summary, preview, onRestored }: { entry: VersionEntry | null; onOpenChange: (open: boolean) => void; summary: Summary; preview: boolean; onRestored: () => void }) {
+function RestoreDialog({ entry, onOpenChange, summary, preview, onRestored }: { entry: VersionEntry | null; onOpenChange: (open: boolean) => void; summary: Summary; preview: boolean; onRestored: (entry: VersionEntry) => void }) {
   const [member, setMember] = useState(summary.members[0] ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -307,7 +324,8 @@ function RestoreDialog({ entry, onOpenChange, summary, preview, onRestored }: { 
     try {
       const response = await fetch('/api/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ eventId: entry.event_id, member }) });
       if (!response.ok) throw new Error(await responseError(response, '恢复失败'));
-      onRestored();
+      const body = await response.json() as { entry: VersionEntry };
+      onRestored(body.entry);
     } catch (reason) { setError(reason instanceof Error ? reason.message : '恢复失败'); }
     finally { setBusy(false); }
   }

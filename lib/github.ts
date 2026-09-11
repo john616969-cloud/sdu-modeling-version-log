@@ -1,5 +1,6 @@
 import { categoryFolders, githubConfig } from '@/lib/config';
 import type { AuditEvent, Category, PresenceRecord, PresenceSummary, Summary, VersionEntry } from '@/lib/types';
+import { CHUNK_MANIFEST_FORMAT, DIRECT_UPLOAD_BYTES, parseChunkManifest, splitUploadChunks, type ChunkManifest } from '@/lib/upload';
 
 type GitHubFile = { sha: string; content?: string; encoding?: string; download_url?: string | null; name?: string };
 type LogIndex = { entries: VersionEntry[] };
@@ -203,27 +204,66 @@ export async function recordAuditEvent(args: { event_type: AuditEvent['event_typ
 }
 
 async function sha256(bytes: Uint8Array) {
-  const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const source = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer as ArrayBuffer
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', source));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+async function createBlob(repository: string, bytes: Uint8Array) {
+  return (await github<{ sha: string }>(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: toBase64(bytes), encoding: 'base64' }) })).sha;
+}
+
+async function readFileBytes(file: GitHubFile) {
+  if (file.content) return fromBase64(file.content);
+  if (file.download_url) {
+    const { token } = githubConfig();
+    const response = await fetch(file.download_url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error('下载文件失败。');
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  throw new Error('GitHub 未返回文件内容。');
+}
+
 async function commitEntries(args: { member: string; category: Category; description: string; originalName: string; bytes?: Uint8Array; sourcePath?: string; sourceEventId?: string }) {
   const { repository, branch } = githubConfig();
+  const eventId = crypto.randomUUID();
+  const uploadedDigest = args.bytes ? await sha256(args.bytes) : null;
+  const uploadChunks = args.bytes && args.bytes.byteLength > DIRECT_UPLOAD_BYTES ? splitUploadChunks(args.bytes) : [];
+  const chunkTreeEntries: Array<{ path: string; mode: string; type: string; sha: string }> = [];
+  let uploadedFileBlobSha: string | null = null;
+  let uploadedManifest: ChunkManifest | null = null;
+  if (args.bytes && uploadChunks.length === 0) uploadedFileBlobSha = await createBlob(repository, args.bytes);
+  if (args.bytes && uploadChunks.length > 0) {
+    const chunkShas: string[] = [];
+    for (const chunk of uploadChunks) chunkShas.push(await createBlob(repository, chunk));
+    uploadedManifest = {
+      format: CHUNK_MANIFEST_FORMAT,
+      original_name: args.originalName,
+      size_bytes: args.bytes.byteLength,
+      sha256: uploadedDigest ?? '',
+      chunks: uploadChunks.map((chunk, index) => ({ path: `chunks/${eventId}/part-${String(index + 1).padStart(5, '0')}`, size_bytes: chunk.byteLength })),
+    };
+    uploadedFileBlobSha = await createBlob(repository, new TextEncoder().encode(JSON.stringify(uploadedManifest, null, 2) + '\n'));
+    uploadedManifest.chunks.forEach((chunk, index) => chunkTreeEntries.push({ path: chunk.path, mode: '100644', type: 'blob', sha: chunkShas[index] }));
+  }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const reference = await github<{ object: { sha: string } }>(`/repos/${repository}/git/ref/heads/${encodePath(branch)}`);
     const parentSha = reference.object.sha;
     const parent = await github<{ tree: { sha: string } }>(`/repos/${repository}/git/commits/${parentSha}`);
     const index = await readJson<LogIndex>('logs/index.json', parentSha, { entries: [] });
     const version = nextVersion(index.entries, args.category);
-    const repositoryPath = `${categoryFolders[args.category]}/${args.category}-${version}-${safeName(args.originalName)}`;
+    const baseRepositoryPath = `${categoryFolders[args.category]}/${args.category}-${version}-${safeName(args.originalName)}`;
+    const repositoryPath = uploadedManifest || args.sourcePath?.endsWith('.parts.json') ? `${baseRepositoryPath}.parts.json` : baseRepositoryPath;
     let fileBlobSha: string;
     let sizeBytes: number;
     let digest: string;
     if (args.bytes) {
-      fileBlobSha = (await github<{ sha: string }>(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: toBase64(args.bytes), encoding: 'base64' }) })).sha;
+      if (!uploadedFileBlobSha || !uploadedDigest) throw new Error('上传文件准备失败。');
+      fileBlobSha = uploadedFileBlobSha;
       sizeBytes = args.bytes.byteLength;
-      digest = await sha256(args.bytes);
+      digest = uploadedDigest;
     } else {
       const source = await readFile(args.sourcePath ?? '', parentSha);
       if (!source) throw new Error('要恢复的历史文件不存在。');
@@ -232,7 +272,6 @@ async function commitEntries(args: { member: string; category: Category; descrip
       sizeBytes = sourceEntry?.size_bytes ?? 0;
       digest = sourceEntry?.sha256 ?? '';
     }
-    const eventId = crypto.randomUUID();
     const timestamp = beijingTimestamp();
     const entry: VersionEntry = { event_id: eventId, event_type: args.bytes ? 'upload' : 'restore', category: args.category, version, member: args.member, timestamp_beijing: timestamp, original_name: args.originalName, repository_path: repositoryPath, size_bytes: sizeBytes, sha256: digest, description: args.description, source_event_id: args.sourceEventId ?? null, external_url: null, commit_sha: null };
     const entries = [entry, ...index.entries].slice(0, 500);
@@ -245,6 +284,7 @@ async function commitEntries(args: { member: string; category: Category; descrip
     ]);
     const logPath = `logs/entries/${timestamp.replace(/[-:+]/g, '').replace('T', '-')}-${eventId.slice(0, 8)}-${args.category}-${version}.json`;
     const tree = await github<{ sha: string }>(`/repos/${repository}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: parent.tree.sha, tree: [
+      ...chunkTreeEntries,
       { path: repositoryPath, mode: '100644', type: 'blob', sha: fileBlobSha },
       { path: logPath, mode: '100644', type: 'blob', sha: textBlobs[0].sha },
       { path: 'logs/index.json', mode: '100644', type: 'blob', sha: textBlobs[1].sha },
@@ -273,13 +313,19 @@ export async function downloadFile(path: string) {
   if (!allowedPrefix || path.includes('..') || Array.from(path).some((character) => character.charCodeAt(0) < 32)) throw new Error('文件路径无效。');
   const file = await readFile(path);
   if (!file) throw Object.assign(new Error('文件不存在。'), { status: 404 });
-  let bytes: Uint8Array;
-  if (file.content) bytes = fromBase64(file.content);
-  else if (file.download_url) {
-    const { token } = githubConfig();
-    const response = await fetch(file.download_url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!response.ok) throw new Error('下载文件失败。');
-    bytes = new Uint8Array(await response.arrayBuffer());
-  } else throw new Error('GitHub 未返回文件内容。');
-  return { bytes, name: file.name ?? path.split('/').at(-1) ?? 'download' };
+  const storedBytes = await readFileBytes(file);
+  const manifest = parseChunkManifest(storedBytes);
+  if (!manifest) return { bytes: storedBytes, name: file.name ?? path.split('/').at(-1) ?? 'download' };
+  const bytes = new Uint8Array(manifest.size_bytes);
+  let offset = 0;
+  for (const chunk of manifest.chunks) {
+    const chunkFile = await readFile(chunk.path);
+    if (!chunkFile) throw new Error('分片文件缺失。');
+    const chunkBytes = await readFileBytes(chunkFile);
+    if (chunkBytes.byteLength !== chunk.size_bytes) throw new Error('分片文件大小不一致。');
+    bytes.set(chunkBytes, offset);
+    offset += chunkBytes.byteLength;
+  }
+  if (offset !== manifest.size_bytes || await sha256(bytes) !== manifest.sha256) throw new Error('分片文件校验失败。');
+  return { bytes, name: manifest.original_name };
 }
